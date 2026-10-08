@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/models/order_model.dart';
 import '../../../core/services/order_service.dart';
@@ -19,10 +21,120 @@ class _ActiveOrderScreenState extends State<ActiveOrderScreen> {
   String _currentStatus = 'Accepted'; // Accepted -> Reached_Store -> Picked_Up -> Delivered
   bool _isLoading = false;
 
+  // SAFE NULL-SAFE INITIALIZATION
+  String _customerPhone = '';
+  String _customerName = 'కస్టమర్';
+  bool _isFetchingCustomer = true;
+
   @override
   void initState() {
     super.initState();
     _currentStatus = widget.order.status.isEmpty ? 'Accepted' : widget.order.status;
+    _fetchCustomerDetails();
+  }
+
+  // 1. FETCH CUSTOMER DETAILS FROM FIRESTORE 'customers' COLLECTION SAFELY
+  Future<void> _fetchCustomerDetails() async {
+    try {
+      final String userId = widget.order.userId ?? '';
+      
+      if (userId.isNotEmpty) {
+        final userDoc = await FirebaseFirestore.instance
+            .collection('customers')
+            .doc(userId)
+            .get();
+
+        if (userDoc.exists && mounted) {
+          final data = userDoc.data();
+          
+          // INT OR STRING TO SAFE STRING CONVERSION
+          final dynamic rawPhone = data?['phone'] ?? widget.order.userPhone ?? '';
+          final dynamic rawName = data?['name'] ?? 'కస్టమర్';
+
+          setState(() {
+            _customerPhone = rawPhone.toString().trim();
+            _customerName = rawName.toString().trim().isNotEmpty 
+                ? rawName.toString().trim() 
+                : 'కస్టమర్';
+            _isFetchingCustomer = false;
+          });
+          return;
+        }
+      }
+
+      if (mounted) {
+        setState(() {
+          _customerPhone = (widget.order.userPhone ?? '').toString().trim();
+          _isFetchingCustomer = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _customerPhone = (widget.order.userPhone ?? '').toString().trim();
+          _isFetchingCustomer = false;
+        });
+      }
+    }
+  }
+
+  // 2. GOOGLE MAPS NAVIGATION FUNCTION
+  Future<void> _openGoogleMaps(String destination) async {
+    final String query = Uri.encodeComponent(destination ?? '');
+    final Uri googleMapsUrl = Uri.parse('https://www.google.com/maps/search/?api=1&query=$query');
+
+    try {
+      if (await canLaunchUrl(googleMapsUrl)) {
+        await launchUrl(googleMapsUrl, mode: LaunchMode.externalApplication);
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Google Maps ఓపెన్ చేయడం కుదరలేదు')),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('ఎర్రర్: ${e.toString()}')),
+        );
+      }
+    }
+  }
+
+  // 3. PHONE CALL FUNCTION
+  Future<void> _makePhoneCall() async {
+    final String phoneToCall = _customerPhone.trim();
+
+    if (phoneToCall.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('కస్టమర్ ఫోన్ నంబర్ అందుబాటులో లేదు')),
+      );
+      return;
+    }
+
+    final Uri launchUri = Uri(
+      scheme: 'tel',
+      path: phoneToCall,
+    );
+
+    try {
+      if (await canLaunchUrl(launchUri)) {
+        await launchUrl(launchUri);
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('కాల్ చేయడం కుదరలేదు: $phoneToCall')),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('ఎర్రర్: ${e.toString()}')),
+        );
+      }
+    }
   }
 
   void _updateStatus(String nextStatus) async {
@@ -48,7 +160,7 @@ class _ActiveOrderScreenState extends State<ActiveOrderScreen> {
   }
 
   void _verifyOtpAndDeliver() {
-    final otp = _otpController.text.trim();
+    final String otp = _otpController.text.trim();
     if (otp.length != 4) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('దయచేసి సరైన 4-Digit Delivery OTP ఎంటర్ చేయండి')),
@@ -198,7 +310,12 @@ class _ActiveOrderScreenState extends State<ActiveOrderScreen> {
 
   // Location Card
   Widget _buildLocationDetailsCard() {
-    bool isPickupPhase = _currentStatus == 'Accepted' || _currentStatus == 'Reached_Store';
+    final bool isPickupPhase = _currentStatus == 'Accepted' || _currentStatus == 'Reached_Store';
+    final String targetAddress = isPickupPhase 
+        ? (widget.order.storeName ?? '') 
+        : (widget.order.deliveryAddress ?? '');
+        
+    final bool hasValidPhone = _customerPhone.trim().isNotEmpty;
 
     return Container(
       padding: const EdgeInsets.all(20),
@@ -217,24 +334,26 @@ class _ActiveOrderScreenState extends State<ActiveOrderScreen> {
                 size: 28,
               ),
               const SizedBox(width: 12),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    isPickupPhase ? 'పిక్-అప్ స్టోర్ (Pickup)' : 'డెలివరీ అడ్రస్ (Drop)',
-                    style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
-                  ),
-                  Text(
-                    isPickupPhase ? widget.order.storeName : 'కస్టమర్ లోకేషన్',
-                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                  ),
-                ],
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      isPickupPhase ? 'పిక్-అప్ స్టోర్ (Pickup)' : 'డెలివరీ అడ్రస్ (Drop)',
+                      style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                    ),
+                    Text(
+                      isPickupPhase ? (widget.order.storeName ?? 'స్టోర్') : _customerName,
+                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    ),
+                  ],
+                ),
               ),
             ],
           ),
           const Divider(height: 24),
           Text(
-            isPickupPhase ? widget.order.storeName : widget.order.deliveryAddress,
+            targetAddress,
             style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
           ),
           const SizedBox(height: 16),
@@ -246,27 +365,28 @@ class _ActiveOrderScreenState extends State<ActiveOrderScreen> {
                     padding: const EdgeInsets.symmetric(vertical: 12),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                   ),
-                  onPressed: () {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Google Maps ఓపెన్ అవుతోంది...')),
-                    );
-                  },
+                  onPressed: () => _openGoogleMaps(targetAddress),
                   icon: const Icon(Icons.navigation, size: 18),
                   label: const Text('MAP NAVIGATE'),
                 ),
               ),
               const SizedBox(width: 12),
-              OutlinedButton(
+              OutlinedButton.icon(
                 style: OutlinedButton.styleFrom(
-                  padding: const EdgeInsets.all(12),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                 ),
-                onPressed: () {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('కాల్ కనెక్ట్ అవుతోంది...')),
-                  );
-                },
-                child: const Icon(Icons.call, color: AppColors.primary),
+                onPressed: _isFetchingCustomer ? null : _makePhoneCall,
+                icon: const Icon(Icons.call, color: AppColors.primary, size: 18),
+                label: Text(
+                  _isFetchingCustomer
+                      ? '...'
+                      : (hasValidPhone ? 'CALL' : 'NO NUMBER'),
+                  style: const TextStyle(
+                    color: AppColors.primary,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
               ),
             ],
           ),
@@ -277,6 +397,8 @@ class _ActiveOrderScreenState extends State<ActiveOrderScreen> {
 
   // Real Items List from Firestore
   Widget _buildItemsListCard() {
+    final items = widget.order.items ?? [];
+
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
@@ -300,7 +422,7 @@ class _ActiveOrderScreenState extends State<ActiveOrderScreen> {
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: Text(
-                  '${widget.order.items.length} Items',
+                  '${items.length} Items',
                   style: const TextStyle(
                     fontWeight: FontWeight.bold,
                     color: AppColors.primary,
@@ -311,7 +433,7 @@ class _ActiveOrderScreenState extends State<ActiveOrderScreen> {
             ],
           ),
           const Divider(height: 20),
-          if (widget.order.items.isEmpty)
+          if (items.isEmpty)
             const Padding(
               padding: EdgeInsets.symmetric(vertical: 8.0),
               child: Text(
@@ -323,9 +445,9 @@ class _ActiveOrderScreenState extends State<ActiveOrderScreen> {
             ListView.builder(
               shrinkWrap: true,
               physics: const NeverScrollableScrollPhysics(),
-              itemCount: widget.order.items.length,
+              itemCount: items.length,
               itemBuilder: (context, index) {
-                final item = widget.order.items[index];
+                final item = items[index];
                 return Padding(
                   padding: const EdgeInsets.symmetric(vertical: 6.0),
                   child: Row(
